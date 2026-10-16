@@ -1,0 +1,37 @@
+
+name: Alpaca Paper Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 13-21 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpaca-paper-bot
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r alpaca-paper-bot/requirements.txt
+
+      - name: Run paper trading bot
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: python alpaca-paper-bot/bot.py
