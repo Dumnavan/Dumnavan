@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -43,7 +44,9 @@ def run():
         return
 
     positions = trading.get_all_positions()
-    orders = trading.get_orders()
+   orders = trading.get_orders(
+    filter=GetOrdersRequest(status=QueryOrderStatus.OPEN)
+)
     if any(p.symbol != SYMBOL for p in positions):
         raise RuntimeError('Unexpected holding detected; refusing to trade')
     if orders:
