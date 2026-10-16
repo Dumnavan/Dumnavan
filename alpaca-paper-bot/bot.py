@@ -36,8 +36,11 @@ def run():
 
     # Refuse to run if this account was not initialized near $50.
     # Reset a new paper account to $50 before using this bot.
-    if equity > Decimal('55'):
-        raise RuntimeError('Equity exceeds $55; verify this is a dedicated $50 paper account')
+if equity > Decimal('55'):
+    raise RuntimeError(
+        'Account equity exceeds the initial safety range. '
+        'Verify the account balance before continuing.'
+    )
 
     if not clock.is_open:
         logging.info('Market closed: no action')
@@ -63,14 +66,20 @@ def run():
             logging.warning('Submitted paper liquidation order')
         return
 
-    now = datetime.now(timezone.utc)
-    bars = data.get_stock_bars(StockBarsRequest(
-        symbol_or_symbols=SYMBOL,
-        timeframe=TimeFrame.Day,
-        start=now - timedelta(days=65),
-        end=now - timedelta(days=1),
-        feed='iex',
-    )).data.get(SYMBOL, [])
+ now = datetime.now(timezone.utc)
+bars = data.get_stock_bars(StockBarsRequest(
+    symbol_or_symbols=SYMBOL,
+    timeframe=TimeFrame.Day,
+    start=now - timedelta(days=90),
+    end=now,
+    feed='iex',
+)).data.get(SYMBOL, [])
+
+# Exclude the current trading day's unfinished candle.
+bars = [
+    bar for bar in bars
+    if bar.timestamp.date() < now.date()
+]
     closes = [Decimal(str(b.close)) for b in sorted(bars, key=lambda b: b.timestamp)]
     if len(closes) < SLOW:
         raise RuntimeError('Insufficient daily history for moving averages')
