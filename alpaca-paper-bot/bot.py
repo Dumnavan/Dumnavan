@@ -1,151 +1,190 @@
-"""Paper-only, scheduled Alpaca trading experiment. Not investment advice."""
+
+"""Read-only Alpaca paper-account trend experiment. Never submits orders."""
+
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
-from alpaca.trading.requests import MarketOrderRequest
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-# Safety default: never submit orders unless explicitly enabled.
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
-def submit_paper_order(trading, order):
-    if DRY_RUN:
-        logging.info(
-            "DRY RUN: Would submit %s order for %s",
-            order.side,
-            order.symbol
-        )
-        return None
+SYMBOL = "SPY"
+START_CAPITAL = Decimal("50")
+MAX_POSITION = Decimal("10")
+DAILY_LOSS = Decimal("2")
+TOTAL_LOSS = Decimal("10")
 
-    return trading.submit_order(order)
-SYMBOL = 'SPY'
-START_CAPITAL = Decimal('50')
-MAX_POSITION = Decimal('10')
-DAILY_LOSS = Decimal('2')
-TOTAL_LOSS = Decimal('10')
 FAST = 5
 SLOW = 20
 
+EASTERN = ZoneInfo("America/New_York")
+
 
 def run():
-    key = os.environ['ALPACA_API_KEY']
-    secret = os.environ['ALPACA_SECRET_KEY']
-    # Intentionally hardcoded paper=True: no live-trading toggle.
+    key = os.environ["ALPACA_API_KEY"]
+    secret = os.environ["ALPACA_SECRET_KEY"]
+
+    # Connect exclusively to paper trading
     trading = TradingClient(key, secret, paper=True)
     data = StockHistoricalDataClient(key, secret)
+
     account = trading.get_account()
     clock = trading.get_clock()
+
     equity = Decimal(str(account.equity))
     previous = Decimal(str(account.last_equity))
-    logging.info('Paper account equity: %s; previous close equity: %s', equity, previous)
+    cash = Decimal(str(account.cash))
 
-    # Refuse to run if this account was not initialized near $50.
-    # Reset a new paper account to $50 before using this bot.
-if equity > Decimal('55'):
-    raise RuntimeError(
-        'Account equity exceeds the initial safety range. '
-        'Verify the account balance before continuing.'
+    logging.info(
+        "READ-ONLY TEST: paper equity=%s cash=%s previous=%s",
+        equity,
+        cash,
+        previous
     )
 
-    if not clock.is_open:
-        logging.info('Market closed: no action')
-        return
+    # Verify the account starts with $50
+    if not (Decimal("49.99") <= equity <= Decimal("50.01")):
+        raise RuntimeError(
+            "Expected a fresh $50 paper account; no action taken"
+        )
 
+    # Check account restrictions
+    if account.trading_blocked or account.account_blocked:
+        raise RuntimeError(
+            "Account is blocked; no action taken"
+        )
+
+    # Check positions and open orders
     positions = trading.get_all_positions()
-   orders = trading.get_orders(
-    filter=GetOrdersRequest(status=QueryOrderStatus.OPEN)
-)
+
+    orders = trading.get_orders(
+        filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN
+        )
+    )
+
     if any(p.symbol != SYMBOL for p in positions):
-        raise RuntimeError('Unexpected holding detected; refusing to trade')
+        raise RuntimeError(
+            "Unexpected holding detected; no action taken"
+        )
+
     if orders:
-        logging.info('Existing order(s) detected; no new orders')
+        logging.info(
+            "Open orders found: would wait for resolution"
+        )
         return
 
-    position = next((p for p in positions if p.symbol == SYMBOL), None)
-    daily_breach = previous - equity >= DAILY_LOSS
-    total_breach = START_CAPITAL - equity >= TOTAL_LOSS
-    if daily_breach or total_breach:
-        logging.warning('Loss limit breached (daily=%s, total=%s)', daily_breach, total_breach)
-        if position:
-            if DRY_RUN:
-    logging.info("DRY RUN: Would close position in %s", SYMBOL)
-else:
-    trading.close_position(SYMBOL)
-            logging.warning('Submitted paper liquidation order')
+    position = next(
+        (p for p in positions if p.symbol == SYMBOL),
+        None
+    )
+
+    # Check loss thresholds
+    if (
+        previous - equity >= DAILY_LOSS
+        or START_CAPITAL - equity >= TOTAL_LOSS
+    ):
+        logging.warning(
+            "Loss threshold breached: would halt and review account"
+        )
         return
 
- now = datetime.now(timezone.utc)
-bars = data.get_stock_bars(StockBarsRequest(
-    symbol_or_symbols=SYMBOL,
-    timeframe=TimeFrame.Day,
-    start=now - timedelta(days=90),
-    end=now,
-    feed='iex',
-)).data.get(SYMBOL, [])
+    # Only analyze during regular market hours
+    if not clock.is_open:
+        logging.info(
+            "Market closed: read-only test finished"
+        )
+        return
 
-# Exclude the current trading day's unfinished candle.
-bars = [
-    bar for bar in bars
-    if bar.timestamp.date() < now.date()
-]
-    closes = [Decimal(str(b.close)) for b in sorted(bars, key=lambda b: b.timestamp)]
+    # Retrieve historical SPY prices
+    now = datetime.now(timezone.utc)
+
+    bars = data.get_stock_bars(
+        StockBarsRequest(
+            symbol_or_symbols=SYMBOL,
+            timeframe=TimeFrame.Day,
+            start=now - timedelta(days=90),
+            end=now,
+            feed="iex",
+        )
+    ).data.get(SYMBOL, [])
+
+    # Exclude today's unfinished trading candle
+    today_et = now.astimezone(EASTERN).date()
+
+    completed = sorted(
+        (
+            bar for bar in bars
+            if bar.timestamp.astimezone(EASTERN).date() < today_et
+        ),
+        key=lambda bar: bar.timestamp
+    )
+
+    closes = [
+        Decimal(str(bar.close))
+        for bar in completed
+    ]
+
     if len(closes) < SLOW:
-        raise RuntimeError('Insufficient daily history for moving averages')
-    fast_ma = sum(closes[-FAST:]) / FAST
-    slow_ma = sum(closes[-SLOW:]) / SLOW
-    logging.info('SPY 5-day MA=%s, 20-day MA=%s', fast_ma, slow_ma)
+        raise RuntimeError(
+            "Insufficient completed daily bars"
+        )
 
+    # Calculate moving averages
+    fast_ma = sum(closes[-FAST:]) / Decimal(FAST)
+    slow_ma = sum(closes[-SLOW:]) / Decimal(SLOW)
+
+    logging.info(
+        "SPY completed-bar MA(%s)=%s MA(%s)=%s",
+        FAST,
+        fast_ma,
+        SLOW,
+        slow_ma
+    )
+
+    # Evaluate hypothetical trading decisions
     if fast_ma <= slow_ma:
         if position:
-            if DRY_RUN:
-    logging.info("DRY RUN: Would close position in %s", SYMBOL)
-else:
-    trading.close_position(SYMBOL)
-            logging.info('Trend down: submitted paper close order')
+            logging.info(
+                "DRY RUN: would close SPY"
+            )
         else:
-            logging.info('Trend down: stay in cash')
-        return
+            logging.info(
+                "DRY RUN: would stay in cash"
+            )
 
-    if position:
-        logging.info('Position already held: no action')
-        return
+    elif position:
+        logging.info(
+            "DRY RUN: would hold existing SPY position"
+        )
 
-    cash = Decimal(str(account.cash))
-    budget = min(MAX_POSITION, cash - Decimal('1'))
-    if budget < Decimal('1'):
-        logging.info('Insufficient cash buffer: no action')
-        return
-    # Fractional market buys via notional, during regular market hours only.
-    order = MarketOrderRequest(
-        symbol=SYMBOL,
-        notional=round(float(budget), 2),
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY,
-    )
-    submitted = submit_paper_order(trading, order)
+    else:
+        budget = min(
+            MAX_POSITION,
+            cash - Decimal("1")
+        )
 
-if submitted is None:
-    logging.info(
-        "DRY RUN: Would buy %s for $%.2f",
-        SYMBOL,
-        float(budget)
-    )
-else:
-    logging.info(
-        "Submitted paper BUY %s notional=$%.2f order=%s",
-        SYMBOL,
-        float(budget),
-        submitted.id
-    )
+        if budget >= Decimal("1"):
+            logging.info(
+                "DRY RUN: would consider buying SPY for $%s",
+                budget
+            )
+        else:
+            logging.info(
+                "DRY RUN: insufficient available cash"
+            )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run()
