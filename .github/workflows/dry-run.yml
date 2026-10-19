@@ -38,9 +38,15 @@ jobs:
           set -o pipefail
           python alpaca-paper-bot/bot.py 2>&1 | tee bot.log
 
+     
       - name: Generate dashboard
-        if: always()
+        if: success()
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          EXPECTED_PAPER_ACCOUNT_ID: ${{ vars.EXPECTED_PAPER_ACCOUNT_ID }}
         run: python alpaca-paper-bot/dashboard.py
+
 
       - name: Upload dashboard
         if: always()
