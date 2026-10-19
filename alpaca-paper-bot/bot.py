@@ -13,6 +13,19 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+# Safety default: never submit orders unless explicitly enabled.
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
+
+def submit_paper_order(trading, order):
+    if DRY_RUN:
+        logging.info(
+            "DRY RUN: Would submit %s order for %s",
+            order.side,
+            order.symbol
+        )
+        return None
+
+    return trading.submit_order(order)
 SYMBOL = 'SPY'
 START_CAPITAL = Decimal('50')
 MAX_POSITION = Decimal('10')
@@ -62,7 +75,10 @@ if equity > Decimal('55'):
     if daily_breach or total_breach:
         logging.warning('Loss limit breached (daily=%s, total=%s)', daily_breach, total_breach)
         if position:
-            trading.close_position(SYMBOL)
+            if DRY_RUN:
+    logging.info("DRY RUN: Would close position in %s", SYMBOL)
+else:
+    trading.close_position(SYMBOL)
             logging.warning('Submitted paper liquidation order')
         return
 
@@ -89,7 +105,10 @@ bars = [
 
     if fast_ma <= slow_ma:
         if position:
-            trading.close_position(SYMBOL)
+            if DRY_RUN:
+    logging.info("DRY RUN: Would close position in %s", SYMBOL)
+else:
+    trading.close_position(SYMBOL)
             logging.info('Trend down: submitted paper close order')
         else:
             logging.info('Trend down: stay in cash')
@@ -111,8 +130,21 @@ bars = [
         side=OrderSide.BUY,
         time_in_force=TimeInForce.DAY,
     )
-    submitted = trading.submit_order(order)
-    logging.info('Submitted paper BUY %s notional=$%.2f order=%s', SYMBOL, float(budget), submitted.id)
+    submitted = submit_paper_order(trading, order)
+
+if submitted is None:
+    logging.info(
+        "DRY RUN: Would buy %s for $%.2f",
+        SYMBOL,
+        float(budget)
+    )
+else:
+    logging.info(
+        "Submitted paper BUY %s notional=$%.2f order=%s",
+        SYMBOL,
+        float(budget),
+        submitted.id
+    )
 
 
 if __name__ == '__main__':
