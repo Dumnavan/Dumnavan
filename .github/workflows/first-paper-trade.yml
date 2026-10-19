@@ -1,0 +1,43 @@
+
+name: First SPY Paper Trade
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type CONFIRM_PAPER_BUY_10 to submit a $10 paper order"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpaca-paper-account
+  cancel-in-progress: false
+
+jobs:
+  paper-trade:
+    if: inputs.confirmation == 'CONFIRM_PAPER_BUY_10'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r alpaca-paper-bot/requirements.txt
+
+      - name: Submit confirmed paper order
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          EXPECTED_PAPER_ACCOUNT_ID: ${{ vars.EXPECTED_PAPER_ACCOUNT_ID }}
+          CONFIRM_PAPER_ORDER: ${{ inputs.confirmation }}
+        run: python alpaca-paper-bot/first_paper_trade.py
