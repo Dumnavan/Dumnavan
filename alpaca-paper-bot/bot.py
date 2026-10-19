@@ -55,10 +55,22 @@ def run():
         "EXPECTED_PAPER_ACCOUNT_ID", ""
     ).strip()
 
+    
+    # Require the correct Alpaca paper account
+    expected_id = os.environ.get(
+        "EXPECTED_PAPER_ACCOUNT_ID", ""
+    ).strip()
+
     if not expected_id:
-    raise RuntimeError(
-        "EXPECTED_PAPER_ACCOUNT_ID is missing"
-    )
+        raise RuntimeError(
+            "EXPECTED_PAPER_ACCOUNT_ID is missing"
+        )
+
+    if str(account.id) != expected_id:
+        raise RuntimeError(
+            "Unexpected paper account ID; no action taken"
+        )
+
 
 if str(account.id) != expected_id:
         raise RuntimeError(
