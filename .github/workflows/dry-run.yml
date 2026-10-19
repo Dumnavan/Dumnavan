@@ -33,4 +33,19 @@ jobs:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           EXPECTED_PAPER_ACCOUNT_ID: ${{ vars.EXPECTED_PAPER_ACCOUNT_ID }}
-        run: python alpaca-paper-bot/bot.py
+        shell: bash
+        run: |
+          set -o pipefail
+          python alpaca-paper-bot/bot.py 2>&1 | tee bot.log
+
+      - name: Generate dashboard
+        if: always()
+        run: python alpaca-paper-bot/dashboard.py
+
+      - name: Upload dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-dashboard
+          path: dashboard.html
+          retention-days: 30
