@@ -44,19 +44,13 @@ def run():
     key = os.environ["ALPACA_API_KEY"]
     secret = os.environ["ALPACA_SECRET_KEY"]
 
-    # Connect exclusively to Alpaca paper trading
+    # Connect exclusively to paper trading
     trading = TradingClient(key, secret, paper=True)
     data = StockHistoricalDataClient(key, secret)
 
     account = trading.get_account()
 
-    # Optional account identity verification
-    expected_id = os.environ.get(
-        "EXPECTED_PAPER_ACCOUNT_ID", ""
-    ).strip()
-
-    
-    # Require the correct Alpaca paper account
+    # Require the correct paper account ID
     expected_id = os.environ.get(
         "EXPECTED_PAPER_ACCOUNT_ID", ""
     ).strip()
@@ -67,12 +61,6 @@ def run():
         )
 
     if str(account.id) != expected_id:
-        raise RuntimeError(
-            "Unexpected paper account ID; no action taken"
-        )
-
-
-if str(account.id) != expected_id:
         raise RuntimeError(
             "Unexpected paper account ID; no action taken"
         )
@@ -169,14 +157,14 @@ if str(account.id) != expected_id:
         )
         return
 
-    # Check whether the market is open
+    # Check market hours
     clock = trading.get_clock()
 
     if not clock.is_open:
         decision("WAIT: market closed")
         return
 
-    # Retrieve historical SPY market data
+    # Retrieve historical SPY prices
     now = datetime.now(timezone.utc)
     today_et = now.astimezone(EASTERN).date()
 
