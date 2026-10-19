@@ -55,7 +55,12 @@ def run():
         "EXPECTED_PAPER_ACCOUNT_ID", ""
     ).strip()
 
-    if expected_id and str(account.id) != expected_id:
+    if not expected_id:
+    raise RuntimeError(
+        "EXPECTED_PAPER_ACCOUNT_ID is missing"
+    )
+
+if str(account.id) != expected_id:
         raise RuntimeError(
             "Unexpected paper account ID; no action taken"
         )
