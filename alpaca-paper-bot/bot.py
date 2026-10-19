@@ -49,7 +49,7 @@ def run():
     data = StockHistoricalDataClient(key, secret)
 
     account = trading.get_account()
-
+    logging.info("PAPER ACCOUNT ID: %s", account.id)
     # Require the correct paper account ID
     expected_id = os.environ.get(
         "EXPECTED_PAPER_ACCOUNT_ID", ""
