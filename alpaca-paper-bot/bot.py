@@ -1,5 +1,5 @@
 
-"""Read-only Alpaca paper-account trend experiment. Never submits orders."""
+"""Read-only Alpaca paper-account SPY strategy with conservative risk checks."""
 
 import logging
 import os
@@ -7,12 +7,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import QueryOrderStatus
-from alpaca.trading.requests import GetOrdersRequest
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +24,7 @@ START_CAPITAL = Decimal("50")
 MAX_POSITION = Decimal("10")
 DAILY_LOSS = Decimal("2")
 TOTAL_LOSS = Decimal("10")
+MIN_CASH_BUFFER = Decimal("1")
 
 FAST = 5
 SLOW = 20
@@ -31,57 +32,68 @@ SLOW = 20
 EASTERN = ZoneInfo("America/New_York")
 
 
+def money(value):
+    return Decimal(str(value))
+
+
+def decision(message, *args):
+    logging.info("DECISION: " + message, *args)
+
+
 def run():
     key = os.environ["ALPACA_API_KEY"]
     secret = os.environ["ALPACA_SECRET_KEY"]
 
-    # Connect exclusively to paper trading
+    # Connect exclusively to Alpaca paper trading
     trading = TradingClient(key, secret, paper=True)
     data = StockHistoricalDataClient(key, secret)
 
     account = trading.get_account()
-    clock = trading.get_clock()
 
-    equity = Decimal(str(account.equity))
-    previous = Decimal(str(account.last_equity))
-    cash = Decimal(str(account.cash))
+    # Optional account identity verification
+    expected_id = os.environ.get(
+        "EXPECTED_PAPER_ACCOUNT_ID", ""
+    ).strip()
+
+    if expected_id and str(account.id) != expected_id:
+        raise RuntimeError(
+            "Unexpected paper account ID; no action taken"
+        )
+
+    equity = money(account.equity)
+    previous_equity = money(account.last_equity)
+    cash = money(account.cash)
 
     logging.info(
-        "READ-ONLY TEST: paper equity=%s cash=%s previous=%s",
+        "MODE=READ_ONLY SYMBOL=%s equity=%s cash=%s previous_equity=%s",
+        SYMBOL,
         equity,
         cash,
-        previous
+        previous_equity
     )
-
-    # Verify the account starts with $50
-    if not (Decimal("49.99") <= equity <= Decimal("50.01")):
-        raise RuntimeError(
-            "Expected a fresh $50 paper account; no action taken"
-        )
 
     # Check account restrictions
     if account.trading_blocked or account.account_blocked:
-        raise RuntimeError(
-            "Account is blocked; no action taken"
-        )
+        decision("HALT: account blocked")
+        return
 
-    # Check positions and open orders
+    # Check existing positions and open orders
     positions = trading.get_all_positions()
 
-    orders = trading.get_orders(
+    open_orders = trading.get_orders(
         filter=GetOrdersRequest(
             status=QueryOrderStatus.OPEN
         )
     )
 
     if any(p.symbol != SYMBOL for p in positions):
-        raise RuntimeError(
-            "Unexpected holding detected; no action taken"
-        )
+        decision("HALT: unexpected holdings present")
+        return
 
-    if orders:
-        logging.info(
-            "Open orders found: would wait for resolution"
+    if open_orders:
+        decision(
+            "WAIT: %s open order(s) present",
+            len(open_orders)
         )
         return
 
@@ -90,25 +102,66 @@ def run():
         None
     )
 
-    # Check loss thresholds
+    position_value = (
+        abs(money(position.market_value))
+        if position
+        else Decimal("0")
+    )
+
+    # Reject short positions
+    if position and money(position.qty) < 0:
+        decision("HALT: short SPY position detected")
+        return
+
+    # Enforce maximum position value
+    if position_value > MAX_POSITION:
+        decision(
+            "HALT: SPY position value %s exceeds maximum %s",
+            position_value,
+            MAX_POSITION
+        )
+        return
+
+    # Calculate loss thresholds
+    daily_drawdown = max(
+        Decimal("0"),
+        previous_equity - equity
+    )
+
+    total_drawdown = max(
+        Decimal("0"),
+        START_CAPITAL - equity
+    )
+
+    logging.info(
+        "RISK: daily_drawdown=%s/%s total_drawdown=%s/%s position_value=%s/%s",
+        daily_drawdown,
+        DAILY_LOSS,
+        total_drawdown,
+        TOTAL_LOSS,
+        position_value,
+        MAX_POSITION
+    )
+
     if (
-        previous - equity >= DAILY_LOSS
-        or START_CAPITAL - equity >= TOTAL_LOSS
+        daily_drawdown >= DAILY_LOSS
+        or total_drawdown >= TOTAL_LOSS
     ):
-        logging.warning(
-            "Loss threshold breached: would halt and review account"
+        decision(
+            "HALT: loss threshold reached; manual review required"
         )
         return
 
-    # Only analyze during regular market hours
+    # Check whether the market is open
+    clock = trading.get_clock()
+
     if not clock.is_open:
-        logging.info(
-            "Market closed: read-only test finished"
-        )
+        decision("WAIT: market closed")
         return
 
-    # Retrieve historical SPY prices
+    # Retrieve historical SPY market data
     now = datetime.now(timezone.utc)
+    today_et = now.astimezone(EASTERN).date()
 
     bars = data.get_stock_bars(
         StockBarsRequest(
@@ -120,9 +173,7 @@ def run():
         )
     ).data.get(SYMBOL, [])
 
-    # Exclude today's unfinished trading candle
-    today_et = now.astimezone(EASTERN).date()
-
+    # Exclude today's unfinished daily candle
     completed = sorted(
         (
             bar for bar in bars
@@ -132,58 +183,67 @@ def run():
     )
 
     closes = [
-        Decimal(str(bar.close))
+        money(bar.close)
         for bar in completed
     ]
 
     if len(closes) < SLOW:
-        raise RuntimeError(
-            "Insufficient completed daily bars"
+        decision(
+            "HALT: insufficient completed daily bars (%s)",
+            len(closes)
         )
+        return
 
     # Calculate moving averages
-    fast_ma = sum(closes[-FAST:]) / Decimal(FAST)
-    slow_ma = sum(closes[-SLOW:]) / Decimal(SLOW)
+    fast_ma = (
+        sum(closes[-FAST:]) / Decimal(FAST)
+    )
+
+    slow_ma = (
+        sum(closes[-SLOW:]) / Decimal(SLOW)
+    )
 
     logging.info(
-        "SPY completed-bar MA(%s)=%s MA(%s)=%s",
+        "SIGNAL: SPY MA(%s)=%s MA(%s)=%s",
         FAST,
         fast_ma,
         SLOW,
         slow_ma
     )
 
-    # Evaluate hypothetical trading decisions
+    # Evaluate hypothetical sell signal
     if fast_ma <= slow_ma:
         if position:
-            logging.info(
-                "DRY RUN: would close SPY"
+            decision(
+                "WOULD_SELL: trend below or equal to slow average; manual review"
             )
         else:
-            logging.info(
-                "DRY RUN: would stay in cash"
+            decision(
+                "STAY_CASH: trend below or equal to slow average"
             )
+        return
 
-    elif position:
-        logging.info(
-            "DRY RUN: would hold existing SPY position"
+    # Evaluate existing position
+    if position:
+        decision("HOLD: existing SPY position")
+        return
+
+    # Calculate hypothetical purchase amount
+    budget = min(
+        MAX_POSITION,
+        cash - MIN_CASH_BUFFER
+    )
+
+    if budget < Decimal("1"):
+        decision(
+            "STAY_CASH: insufficient cash buffer"
         )
-
     else:
-        budget = min(
-            MAX_POSITION,
-            cash - Decimal("1")
+        decision(
+            "WOULD_BUY: %s notional=%s (no order submitted)",
+            SYMBOL,
+            budget
         )
-
-        if budget >= Decimal("1"):
-            logging.info(
-                "DRY RUN: would consider buying SPY for $%s",
-                budget
-            )
-        else:
-            logging.info(
-                "DRY RUN: insufficient available cash"
-            )
 
 
 if __name__ == "__main__":
