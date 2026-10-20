@@ -1,5 +1,5 @@
 
-"""Alpaca paper account dashboard V3 - read only."""
+"""Alpaca Paper Bot Dashboard V3.1 - read-only performance tracking."""
 
 import html
 import logging
@@ -18,103 +18,133 @@ from alpaca.trading.requests import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-START_CAPITAL = Decimal("50")
 SYMBOL = "SPY"
+START_CAPITAL = Decimal("50")
+DAILY_LOSS_LIMIT = Decimal("2")
+TOTAL_LOSS_LIMIT = Decimal("10")
 
 
 def dec(value):
     return Decimal(str(value if value is not None else "0"))
 
 
-def dollars(value):
-    return f"${dec(value):,.2f}"
+def usd(value):
+    value = dec(value)
+    return f"-${abs(value):,.2f}" if value < 0 else f"${value:,.2f}"
+
+
+def signed_usd(value):
+    value = dec(value)
+    sign = "+" if value > 0 else ""
+    return sign + usd(value)
 
 
 def esc(value):
     return html.escape(str(value), quote=True)
 
 
-def log_value(pattern, log, default="N/A"):
-    matches = re.findall(pattern, log)
+def log_value(pattern, content, default="N/A"):
+    matches = re.findall(pattern, content)
     return matches[-1] if matches else default
 
 
-def card(title, value, subtitle=""):
-    return (
-        '<div class="card">'
-        f'<div class="label">{esc(title)}</div>'
-        f'<div class="value">{esc(value)}</div>'
-        f'<div class="detail">{esc(subtitle)}</div>'
-        '</div>'
-    )
+def card(label, value, detail=""):
+    return f"""
+    <div class="card">
+      <div class="label">{esc(label)}</div>
+      <div class="value">{esc(value)}</div>
+      <div class="detail">{esc(detail)}</div>
+    </div>
+    """
 
 
-def equity_chart(points):
+def make_chart(points):
     if not points:
-        return '<p class="muted">No historical equity data available yet.</p>'
+        return '<p class="muted">No funded-account history available yet.</p>'
 
-    values = [float(value) for _, value in points]
-    low = min(values)
-    high = max(values)
-    padding = max((high - low) * 0.15, 0.02)
-    low -= padding
-    high += padding
+    values = [float(equity) for _, equity in points]
 
-    width, height = 900, 280
-    left, right, top, bottom = 65, 20, 20, 45
-    plot_w = width - left - right
-    plot_h = height - top - bottom
+    minimum = min(values)
+    maximum = max(values)
 
-    coords = []
-    for i, (_, value) in enumerate(points):
+    # Keep a small visible range even if equity barely changes.
+    padding = max((maximum - minimum) * 0.2, 0.05)
+    minimum -= padding
+    maximum += padding
+
+    width = 900
+    height = 300
+    left = 75
+    right = 25
+    top = 20
+    bottom = 50
+
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+
+    coordinates = []
+
+    for index, (_, value) in enumerate(points):
         x = left + (
-            plot_w * i / max(len(points) - 1, 1)
+            plot_width * index / max(len(points) - 1, 1)
         )
         y = top + (
-            plot_h * (high - float(value)) / (high - low)
+            plot_height * (maximum - float(value))
+            / (maximum - minimum)
         )
-        coords.append((x, y))
-
-    polyline = " ".join(
-        f"{x:.1f},{y:.1f}" for x, y in coords
-    )
+        coordinates.append((x, y))
 
     grid = ""
-    for i in range(5):
-        value = high - (high - low) * i / 4
-        y = top + plot_h * i / 4
-        grid += (
-            f'<line x1="{left}" y1="{y:.1f}" '
-            f'x2="{width-right}" y2="{y:.1f}" '
-            'stroke="#334155" stroke-dasharray="4 5"/>'
-            f'<text x="{left-10}" y="{y+4:.1f}" '
-            'text-anchor="end" fill="#94a3b8" font-size="12">'
-            f'${value:.2f}</text>'
-        )
 
-    first_date = esc(points[0][0])
-    last_date = esc(points[-1][0])
+    for i in range(5):
+        amount = maximum - (maximum - minimum) * i / 4
+        y = top + plot_height * i / 4
+
+        grid += f"""
+        <line x1="{left}" y1="{y:.2f}"
+              x2="{width-right}" y2="{y:.2f}"
+              stroke="#334155" stroke-dasharray="4 5"/>
+        <text x="{left-12}" y="{y+4:.2f}"
+              text-anchor="end" fill="#94a3b8"
+              font-size="12">${amount:.2f}</text>
+        """
+
+    line = " ".join(
+        f"{x:.2f},{y:.2f}" for x, y in coordinates
+    )
+
+    circles = ""
+
+    for x, y in coordinates:
+        circles += (
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" '
+            'r="3" fill="#38bdf8"/>'
+        )
 
     return f"""
     <svg viewBox="0 0 {width} {height}"
-         role="img" aria-label="Historical account equity chart">
-        {grid}
-        <polyline points="{polyline}"
-                  fill="none"
-                  stroke="#38bdf8"
-                  stroke-width="3"
-                  stroke-linejoin="round"
-                  stroke-linecap="round"/>
-        <circle cx="{coords[-1][0]:.1f}"
-                cy="{coords[-1][1]:.1f}"
-                r="5" fill="#86efac"/>
-        <text x="{left}" y="{height-10}"
-              fill="#94a3b8" font-size="12">{first_date}</text>
-        <text x="{width-right}" y="{height-10}"
-              text-anchor="end"
-              fill="#94a3b8" font-size="12">{last_date}</text>
+         role="img"
+         aria-label="Paper account equity since funding">
+      {grid}
+      <polyline points="{line}"
+                fill="none"
+                stroke="#38bdf8"
+                stroke-width="3"
+                stroke-linejoin="round"/>
+      {circles}
+      <text x="{left}" y="{height-12}"
+            fill="#94a3b8" font-size="12">
+        {esc(points[0][0])}
+      </text>
+      <text x="{width-right}" y="{height-12}"
+            text-anchor="end"
+            fill="#94a3b8" font-size="12">
+        {esc(points[-1][0])}
+      </text>
     </svg>
-    <p class="muted">{len(points)} historical data point(s).</p>
+    <p class="muted">
+      {len(points)} funded-account data point(s).
+    </p>
     """
 
 
@@ -124,21 +154,20 @@ def main():
     expected_id = os.environ["EXPECTED_PAPER_ACCOUNT_ID"].strip()
 
     if not expected_id:
-        raise RuntimeError("EXPECTED_PAPER_ACCOUNT_ID is missing")
+        raise RuntimeError("Expected paper account ID is missing")
 
-    trading = TradingClient(key, secret, paper=True)
-    account = trading.get_account()
+    client = TradingClient(key, secret, paper=True)
+    account = client.get_account()
 
     if str(account.id) != expected_id:
         raise RuntimeError("Unexpected paper account ID")
 
     equity = dec(account.equity)
     cash = dec(account.cash)
-    previous = dec(account.last_equity)
-    total_return = equity - START_CAPITAL
-    return_pct = total_return / START_CAPITAL * 100
+    previous_equity = dec(account.last_equity)
 
-    positions = trading.get_all_positions()
+    positions = client.get_all_positions()
+
     if any(p.symbol != SYMBOL for p in positions):
         raise RuntimeError("Unexpected holdings detected")
 
@@ -147,48 +176,82 @@ def main():
         None
     )
 
-    qty = str(position.qty) if position else "0"
+    quantity = str(position.qty) if position else "0"
     market_value = dec(position.market_value) if position else dec(0)
-    entry = dec(position.avg_entry_price) if position else dec(0)
-    unrealized = dec(position.unrealized_pl) if position else dec(0)
+    entry_price = dec(position.avg_entry_price) if position else dec(0)
+    unrealized_pl = dec(position.unrealized_pl) if position else dec(0)
 
-    orders = trading.get_orders(
+    orders = client.get_orders(
         filter=GetOrdersRequest(
             status=QueryOrderStatus.ALL,
             limit=20
         )
     )
 
-    # Fetch historical account equity from Alpaca.
-    # Failure to fetch history will not hide current account data.
+    # Retrieve historical equity and funding-adjusted P/L.
     points = []
-    history_message = ""
+    history_note = ""
+    performance_pl = None
+    performance_pct = None
 
     try:
-        history = trading.get_portfolio_history(
+        history = client.get_portfolio_history(
             GetPortfolioHistoryRequest(
                 period="1M",
                 timeframe="1D"
             )
         )
 
-        for timestamp, value in zip(
-            history.timestamp or [],
-            history.equity or []
-        ):
+        timestamps = history.timestamp or []
+        equities = history.equity or []
+
+        # A nonzero balance alone does not prove an account was
+        # funded. Here we use the first balance near our known
+        # starting amount as the beginning of the chart.
+        funding_threshold = START_CAPITAL * Decimal("0.90")
+        funded = False
+
+        for timestamp, value in zip(timestamps, equities):
             if value is None:
                 continue
 
+            amount = dec(value)
+
+            if not funded:
+                if amount < funding_threshold:
+                    continue
+                funded = True
+
             date = datetime.fromtimestamp(
-                int(timestamp),
-                tz=timezone.utc
+                int(timestamp), timezone.utc
             ).strftime("%b %d")
 
-            points.append((date, dec(value)))
+            points.append((date, amount))
+
+        # Alpaca's profit_loss history is adjusted for cashflows.
+        # It is more meaningful than equity minus $50 when
+        # deposits or withdrawals may have occurred.
+        pl_values = [
+            dec(value)
+            for value in (history.profit_loss or [])
+            if value is not None
+        ]
+
+        pct_values = [
+            dec(value)
+            for value in (history.profit_loss_pct or [])
+            if value is not None
+        ]
+
+        if pl_values:
+            performance_pl = pl_values[-1]
+
+        if pct_values:
+            performance_pct = pct_values[-1] * 100
 
         if not points:
-            history_message = (
-                "Alpaca has not returned historical equity points yet."
+            history_note = (
+                "No funded-account daily history found yet."
             )
 
     except Exception as exc:
@@ -196,27 +259,38 @@ def main():
             "Portfolio history unavailable: %s",
             type(exc).__name__
         )
-        history_message = (
-            "Historical data is temporarily unavailable."
-        )
+        history_note = "Portfolio history temporarily unavailable."
 
-    log = (
+    # Starting-capital return assumes no subsequent transfers.
+    equity_change = equity - START_CAPITAL
+    equity_change_pct = equity_change / START_CAPITAL * 100
+
+    daily_drawdown = max(
+        dec(0), previous_equity - equity
+    )
+    total_drawdown = max(
+        dec(0), START_CAPITAL - equity
+    )
+
+    logs = (
         Path("bot.log").read_text(encoding="utf-8")
         if Path("bot.log").exists()
         else ""
     )
 
-    fast = log_value(r"MA\(5\)=([\d.]+)", log)
-    slow = log_value(r"MA\(20\)=([\d.]+)", log)
+    fast = log_value(r"MA\(5\)=([\d.]+)", logs)
+    slow = log_value(r"MA\(20\)=([\d.]+)", logs)
     decision = log_value(
         r"DECISION: ([^\n]+)",
-        log,
+        logs,
         "No decision recorded"
     )
 
     rows = ""
+
     for order in orders[:5]:
         submitted = getattr(order, "submitted_at", None)
+
         date = (
             submitted.strftime("%Y-%m-%d %H:%M UTC")
             if submitted else "N/A"
@@ -229,12 +303,12 @@ def main():
 
         rows += f"""
         <tr>
-            <td>{esc(date)}</td>
-            <td>{esc(order.symbol)}</td>
-            <td>{esc(side)}</td>
-            <td>{esc(status)}</td>
-            <td>{esc(filled_qty)}</td>
-            <td>{dollars(filled_price) if filled_price else "—"}</td>
+          <td>{esc(date)}</td>
+          <td>{esc(order.symbol)}</td>
+          <td>{esc(side)}</td>
+          <td>{esc(status)}</td>
+          <td>{esc(filled_qty)}</td>
+          <td>{usd(filled_price) if filled_price else "—"}</td>
         </tr>
         """
 
@@ -242,28 +316,50 @@ def main():
         rows = '<tr><td colspan="6">No orders found.</td></tr>'
 
     cards = "".join([
-        card("Account Equity", dollars(equity)),
-        card("Available Cash", dollars(cash)),
+        card("Account Equity", usd(equity)),
+        card("Available Cash", usd(cash)),
         card(
-            "Return Since $50 Start",
-            f"{total_return:+.2f} USD",
-            f"{return_pct:+.3f}%"
+            "Equity Change Since $50",
+            signed_usd(equity_change),
+            f"{equity_change_pct:+.3f}% — assumes no transfers"
         ),
-        card("SPY Market Value", dollars(market_value)),
-        card("SPY Shares", qty),
-        card("Average Entry Price", f"${entry:.3f}"),
-        card("Unrealized SPY P/L", dollars(unrealized)),
+        card("SPY Market Value", usd(market_value)),
+        card("SPY Shares", quantity),
+        card("Average Entry Price", f"${entry_price:.3f}"),
+        card("Unrealized SPY P/L", signed_usd(unrealized_pl)),
         card(
             "Daily Drawdown",
-            dollars(max(dec(0), previous - equity)),
-            "$2.00 monitoring threshold"
+            usd(daily_drawdown),
+            f"Monitoring threshold: {usd(DAILY_LOSS_LIMIT)}"
         ),
         card(
             "Total Drawdown",
-            dollars(max(dec(0), START_CAPITAL - equity)),
-            "$10.00 monitoring threshold"
+            usd(total_drawdown),
+            f"Monitoring threshold: {usd(TOTAL_LOSS_LIMIT)}"
         ),
     ])
+
+    performance_section = ""
+
+    if performance_pl is not None:
+        pct_text = (
+            f"{performance_pct:+.3f}%"
+            if performance_pct is not None
+            else "Percentage unavailable"
+        )
+
+        performance_section = f"""
+        <div class="panel">
+          <h2>Alpaca Portfolio Performance</h2>
+          <div class="value">{esc(signed_usd(performance_pl))}</div>
+          <p>{esc(pct_text)}</p>
+          <p class="muted">
+            Based on Alpaca's portfolio-history performance
+            fields for the requested one-month period.
+            This is not necessarily lifetime performance.
+          </p>
+        </div>
+        """
 
     updated = datetime.now(timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
@@ -274,7 +370,7 @@ def main():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Alpaca Paper Bot V3</title>
+<title>Alpaca Paper Bot V3.1</title>
 <style>
 * {{ box-sizing: border-box; }}
 body {{
@@ -331,32 +427,32 @@ th {{ color: #94a3b8; }}
 </head>
 <body>
 <main>
-<h1>Alpaca Paper Bot — V3</h1>
+<h1>Alpaca Paper Bot — V3.1</h1>
 <p class="muted">Updated {esc(updated)}</p>
 <p class="muted">
-READ ONLY — No orders are submitted by this dashboard.
+READ ONLY — Dashboard does not submit orders.
 </p>
 
 <div class="grid">{cards}</div>
 
 <section class="panel">
-<h2>Account Equity — Last Month</h2>
-{equity_chart(points)}
-<p class="muted">{esc(history_message)}</p>
+<h2>Account Equity — Since Initial Funding</h2>
+{make_chart(points)}
+<p class="muted">{esc(history_note)}</p>
 <p class="muted">
-Historical points come from Alpaca and may exclude
-the latest intraday changes.
+Daily historical equity is filtered to begin near
+the original $50 funding amount. Later deposits or
+withdrawals are not removed from this equity chart.
 </p>
 </section>
+
+{performance_section}
 
 <section class="panel">
 <h2>SPY Strategy</h2>
 <p>5-day moving average: {esc(fast)}</p>
 <p>20-day moving average: {esc(slow)}</p>
 <p class="signal">{esc(decision)}</p>
-<p class="muted">
-Decision taken from the latest read-only bot log.
-</p>
 </section>
 
 <section class="panel">
@@ -379,18 +475,18 @@ Decision taken from the latest read-only bot log.
 </section>
 
 <p class="muted">
-Paper trading uses simulated money. Returns shown relative
-to $50 assume no deposits or withdrawals since the start.
+Paper trading uses simulated funds and does not
+guarantee live-trading performance.
 </p>
 </main>
 </body>
 </html>"""
 
     Path("dashboard.html").write_text(
-        page,
-        encoding="utf-8"
+        page, encoding="utf-8"
     )
-    logging.info("Dashboard V3 generated: dashboard.html")
+
+    logging.info("Dashboard V3.1 generated successfully")
 
 
 if __name__ == "__main__":
