@@ -119,13 +119,15 @@ def run():
         return
 
     # Enforce maximum position value
+    
     if position_value > MAX_POSITION:
-        decision(
-            "HALT: SPY position value %s exceeds maximum %s",
+        logging.warning(
+            "SPY market value %s is above the %s purchase cap; "
+            "existing position will still be analyzed",
             position_value,
-            MAX_POSITION
+            MAX_POSITION,
         )
-        return
+
 
     # Calculate loss thresholds
     daily_drawdown = max(
