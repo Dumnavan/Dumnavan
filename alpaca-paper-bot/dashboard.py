@@ -1,5 +1,5 @@
 
-"""Read-only dashboard for an Alpaca paper-trading account."""
+"""Alpaca paper account dashboard V3 - read only."""
 
 import html
 import logging
@@ -11,40 +11,111 @@ from pathlib import Path
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import QueryOrderStatus
-from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    GetPortfolioHistoryRequest,
+)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-SYMBOL = "SPY"
 START_CAPITAL = Decimal("50")
-DAILY_LIMIT = Decimal("2")
-TOTAL_LIMIT = Decimal("10")
-POSITION_LIMIT = Decimal("10")
+SYMBOL = "SPY"
 
 
-def money(value):
-    return Decimal(str(value or "0"))
+def dec(value):
+    return Decimal(str(value if value is not None else "0"))
 
 
-def fmt(value, places=2):
-    return f"${money(value):,.{places}f}"
+def dollars(value):
+    return f"${dec(value):,.2f}"
 
 
-def safe(value):
+def esc(value):
     return html.escape(str(value), quote=True)
 
 
-def get_log_value(pattern, logs, default="N/A"):
-    matches = re.findall(pattern, logs)
+def log_value(pattern, log, default="N/A"):
+    matches = re.findall(pattern, log)
     return matches[-1] if matches else default
 
 
-def progress(value, limit):
-    percentage = max(
-        Decimal("0"),
-        min(Decimal("100"), money(value) / limit * 100)
+def card(title, value, subtitle=""):
+    return (
+        '<div class="card">'
+        f'<div class="label">{esc(title)}</div>'
+        f'<div class="value">{esc(value)}</div>'
+        f'<div class="detail">{esc(subtitle)}</div>'
+        '</div>'
     )
-    return float(percentage)
+
+
+def equity_chart(points):
+    if not points:
+        return '<p class="muted">No historical equity data available yet.</p>'
+
+    values = [float(value) for _, value in points]
+    low = min(values)
+    high = max(values)
+    padding = max((high - low) * 0.15, 0.02)
+    low -= padding
+    high += padding
+
+    width, height = 900, 280
+    left, right, top, bottom = 65, 20, 20, 45
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    coords = []
+    for i, (_, value) in enumerate(points):
+        x = left + (
+            plot_w * i / max(len(points) - 1, 1)
+        )
+        y = top + (
+            plot_h * (high - float(value)) / (high - low)
+        )
+        coords.append((x, y))
+
+    polyline = " ".join(
+        f"{x:.1f},{y:.1f}" for x, y in coords
+    )
+
+    grid = ""
+    for i in range(5):
+        value = high - (high - low) * i / 4
+        y = top + plot_h * i / 4
+        grid += (
+            f'<line x1="{left}" y1="{y:.1f}" '
+            f'x2="{width-right}" y2="{y:.1f}" '
+            'stroke="#334155" stroke-dasharray="4 5"/>'
+            f'<text x="{left-10}" y="{y+4:.1f}" '
+            'text-anchor="end" fill="#94a3b8" font-size="12">'
+            f'${value:.2f}</text>'
+        )
+
+    first_date = esc(points[0][0])
+    last_date = esc(points[-1][0])
+
+    return f"""
+    <svg viewBox="0 0 {width} {height}"
+         role="img" aria-label="Historical account equity chart">
+        {grid}
+        <polyline points="{polyline}"
+                  fill="none"
+                  stroke="#38bdf8"
+                  stroke-width="3"
+                  stroke-linejoin="round"
+                  stroke-linecap="round"/>
+        <circle cx="{coords[-1][0]:.1f}"
+                cy="{coords[-1][1]:.1f}"
+                r="5" fill="#86efac"/>
+        <text x="{left}" y="{height-10}"
+              fill="#94a3b8" font-size="12">{first_date}</text>
+        <text x="{width-right}" y="{height-10}"
+              text-anchor="end"
+              fill="#94a3b8" font-size="12">{last_date}</text>
+    </svg>
+    <p class="muted">{len(points)} historical data point(s).</p>
+    """
 
 
 def main():
@@ -53,133 +124,157 @@ def main():
     expected_id = os.environ["EXPECTED_PAPER_ACCOUNT_ID"].strip()
 
     if not expected_id:
-        raise RuntimeError("Paper account ID is missing")
+        raise RuntimeError("EXPECTED_PAPER_ACCOUNT_ID is missing")
 
-    # Read-only Alpaca API calls, paper account only.
-    client = TradingClient(key, secret, paper=True)
-    account = client.get_account()
+    trading = TradingClient(key, secret, paper=True)
+    account = trading.get_account()
 
     if str(account.id) != expected_id:
-        raise RuntimeError("Paper account ID mismatch")
+        raise RuntimeError("Unexpected paper account ID")
 
-    positions = client.get_all_positions()
+    equity = dec(account.equity)
+    cash = dec(account.cash)
+    previous = dec(account.last_equity)
+    total_return = equity - START_CAPITAL
+    return_pct = total_return / START_CAPITAL * 100
 
+    positions = trading.get_all_positions()
     if any(p.symbol != SYMBOL for p in positions):
-        raise RuntimeError(
-            "Unexpected holdings detected; dashboard not generated"
-        )
+        raise RuntimeError("Unexpected holdings detected")
 
     position = next(
         (p for p in positions if p.symbol == SYMBOL),
         None
     )
 
-    orders = client.get_orders(
+    qty = str(position.qty) if position else "0"
+    market_value = dec(position.market_value) if position else dec(0)
+    entry = dec(position.avg_entry_price) if position else dec(0)
+    unrealized = dec(position.unrealized_pl) if position else dec(0)
+
+    orders = trading.get_orders(
         filter=GetOrdersRequest(
             status=QueryOrderStatus.ALL,
             limit=20
         )
     )
 
-    equity = money(account.equity)
-    cash = money(account.cash)
-    previous = money(account.last_equity)
+    # Fetch historical account equity from Alpaca.
+    # Failure to fetch history will not hide current account data.
+    points = []
+    history_message = ""
 
-    daily_drawdown = max(Decimal("0"), previous - equity)
-    total_drawdown = max(Decimal("0"), START_CAPITAL - equity)
+    try:
+        history = trading.get_portfolio_history(
+            GetPortfolioHistoryRequest(
+                period="1M",
+                timeframe="1D"
+            )
+        )
 
-    if position:
-        quantity = str(position.qty)
-        market_value = money(position.market_value)
-        entry_price = money(position.avg_entry_price)
-        unrealized_pl = money(position.unrealized_pl)
-        unrealized_pct = money(position.unrealized_plpc) * 100
-    else:
-        quantity = "0"
-        market_value = Decimal("0")
-        entry_price = Decimal("0")
-        unrealized_pl = Decimal("0")
-        unrealized_pct = Decimal("0")
+        for timestamp, value in zip(
+            history.timestamp or [],
+            history.equity or []
+        ):
+            if value is None:
+                continue
 
-    logs = (
+            date = datetime.fromtimestamp(
+                int(timestamp),
+                tz=timezone.utc
+            ).strftime("%b %d")
+
+            points.append((date, dec(value)))
+
+        if not points:
+            history_message = (
+                "Alpaca has not returned historical equity points yet."
+            )
+
+    except Exception as exc:
+        logging.warning(
+            "Portfolio history unavailable: %s",
+            type(exc).__name__
+        )
+        history_message = (
+            "Historical data is temporarily unavailable."
+        )
+
+    log = (
         Path("bot.log").read_text(encoding="utf-8")
         if Path("bot.log").exists()
         else ""
     )
 
-    fast = get_log_value(r"MA\(5\)=([\d.]+)", logs)
-    slow = get_log_value(r"MA\(20\)=([\d.]+)", logs)
-    decision = get_log_value(
+    fast = log_value(r"MA\(5\)=([\d.]+)", log)
+    slow = log_value(r"MA\(20\)=([\d.]+)", log)
+    decision = log_value(
         r"DECISION: ([^\n]+)",
-        logs,
-        "No strategy decision recorded"
+        log,
+        "No decision recorded"
     )
 
-    # Build recent order history.
-    order_rows = ""
-
+    rows = ""
     for order in orders[:5]:
         submitted = getattr(order, "submitted_at", None)
-        date_text = (
+        date = (
             submitted.strftime("%Y-%m-%d %H:%M UTC")
-            if submitted
-            else "N/A"
+            if submitted else "N/A"
         )
 
         side = getattr(order.side, "value", str(order.side))
         status = getattr(order.status, "value", str(order.status))
-
-        filled_qty = getattr(order, "filled_qty", None)
+        filled_qty = getattr(order, "filled_qty", None) or "0"
         filled_price = getattr(order, "filled_avg_price", None)
 
-        order_rows += f"""
+        rows += f"""
         <tr>
-            <td>{safe(date_text)}</td>
-            <td>{safe(order.symbol)}</td>
-            <td>{safe(side)}</td>
-            <td>{safe(status)}</td>
-            <td>{safe(filled_qty or "0")}</td>
-            <td>{fmt(filled_price) if filled_price else "—"}</td>
+            <td>{esc(date)}</td>
+            <td>{esc(order.symbol)}</td>
+            <td>{esc(side)}</td>
+            <td>{esc(status)}</td>
+            <td>{esc(filled_qty)}</td>
+            <td>{dollars(filled_price) if filled_price else "—"}</td>
         </tr>
         """
 
-    if not order_rows:
-        order_rows = """
-        <tr><td colspan="6">No recent orders found</td></tr>
-        """
+    if not rows:
+        rows = '<tr><td colspan="6">No orders found.</td></tr>'
 
-    timestamp = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M UTC"
-    )
-
-    def card(label, value, detail=""):
-        return f"""
-        <div class="card">
-            <div class="label">{safe(label)}</div>
-            <div class="value">{safe(value)}</div>
-            <div class="detail">{safe(detail)}</div>
-        </div>
-        """
-
-    account_cards = "".join([
-        card("Account Equity", fmt(equity)),
-        card("Available Cash", fmt(cash)),
-        card("SPY Market Value", fmt(market_value)),
-        card("SPY Shares", quantity),
-        card("Average Entry Price", fmt(entry_price, 3)),
+    cards = "".join([
+        card("Account Equity", dollars(equity)),
+        card("Available Cash", dollars(cash)),
         card(
-            "Unrealized P/L",
-            fmt(unrealized_pl),
-            f"{unrealized_pct:+.3f}%"
+            "Return Since $50 Start",
+            f"{total_return:+.2f} USD",
+            f"{return_pct:+.3f}%"
+        ),
+        card("SPY Market Value", dollars(market_value)),
+        card("SPY Shares", qty),
+        card("Average Entry Price", f"${entry:.3f}"),
+        card("Unrealized SPY P/L", dollars(unrealized)),
+        card(
+            "Daily Drawdown",
+            dollars(max(dec(0), previous - equity)),
+            "$2.00 monitoring threshold"
+        ),
+        card(
+            "Total Drawdown",
+            dollars(max(dec(0), START_CAPITAL - equity)),
+            "$10.00 monitoring threshold"
         ),
     ])
+
+    updated = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Alpaca Paper Bot Dashboard</title>
+<title>Alpaca Paper Bot V3</title>
 <style>
 * {{ box-sizing: border-box; }}
 body {{
@@ -193,8 +288,6 @@ main {{ max-width: 1100px; margin: auto; }}
 h1 {{ margin-bottom: 8px; }}
 h2 {{ margin-top: 0; }}
 .muted, .label, .detail {{ color: #94a3b8; }}
-.label {{ font-size: 14px; }}
-.detail {{ margin-top: 8px; font-size: 13px; }}
 .grid {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -208,85 +301,61 @@ h2 {{ margin-top: 0; }}
     padding: 20px;
 }}
 .panel {{ margin: 20px 0; }}
+.label {{ font-size: 14px; }}
 .value {{
-    font-size: 28px;
+    font-size: 26px;
     font-weight: bold;
     margin-top: 10px;
 }}
-.track {{
-    height: 12px;
-    background: #334155;
-    border-radius: 8px;
-    overflow: hidden;
-}}
-.fill {{
-    height: 100%;
-    background: #38bdf8;
-}}
+.detail {{ font-size: 13px; margin-top: 8px; }}
+svg {{ width: 100%; height: auto; }}
 table {{
     width: 100%;
-    border-collapse: collapse;
     min-width: 650px;
+    border-collapse: collapse;
 }}
 th, td {{
     padding: 12px;
-    text-align: left;
     border-bottom: 1px solid #334155;
+    text-align: left;
     font-size: 14px;
 }}
 th {{ color: #94a3b8; }}
 .table-wrap {{ overflow-x: auto; }}
 .signal {{
-    font-size: 19px;
     color: #86efac;
+    font-size: 18px;
     overflow-wrap: anywhere;
 }}
 </style>
 </head>
 <body>
 <main>
-<h1>Alpaca Paper Bot</h1>
+<h1>Alpaca Paper Bot — V3</h1>
+<p class="muted">Updated {esc(updated)}</p>
 <p class="muted">
-Paper account dashboard | Updated {safe(timestamp)}
-</p>
-<p class="muted">
-READ ONLY — This dashboard never submits orders.
+READ ONLY — No orders are submitted by this dashboard.
 </p>
 
-<div class="grid">
-{account_cards}
-</div>
+<div class="grid">{cards}</div>
 
 <section class="panel">
-<h2>Risk Management</h2>
-
-<p>Daily drawdown: {fmt(daily_drawdown)} / $2.00</p>
-<div class="track">
-<div class="fill" style="width:{progress(daily_drawdown, DAILY_LIMIT)}%"></div>
-</div>
-
-<p>Total drawdown: {fmt(total_drawdown)} / $10.00</p>
-<div class="track">
-<div class="fill" style="width:{progress(total_drawdown, TOTAL_LIMIT)}%"></div>
-</div>
-
-<p>SPY exposure: {fmt(abs(market_value))} / $10.00</p>
-<div class="track">
-<div class="fill" style="width:{progress(abs(market_value), POSITION_LIMIT)}%"></div>
-</div>
-
+<h2>Account Equity — Last Month</h2>
+{equity_chart(points)}
+<p class="muted">{esc(history_message)}</p>
 <p class="muted">
-Risk thresholds are monitoring checks, not guaranteed stop-losses.
+Historical points come from Alpaca and may exclude
+the latest intraday changes.
 </p>
 </section>
 
 <section class="panel">
 <h2>SPY Strategy</h2>
-<p>5-day moving average: {safe(fast)}</p>
-<p>20-day moving average: {safe(slow)}</p>
-<p class="signal">{safe(decision)}</p>
+<p>5-day moving average: {esc(fast)}</p>
+<p>20-day moving average: {esc(slow)}</p>
+<p class="signal">{esc(decision)}</p>
 <p class="muted">
-The decision comes from the latest dry-run analysis.
+Decision taken from the latest read-only bot log.
 </p>
 </section>
 
@@ -304,16 +373,14 @@ The decision comes from the latest dry-run analysis.
 <th>Average Fill</th>
 </tr>
 </thead>
-<tbody>
-{order_rows}
-</tbody>
+<tbody>{rows}</tbody>
 </table>
 </div>
 </section>
 
 <p class="muted">
-Paper trading is simulated. Performance is not a prediction
-of live trading results.
+Paper trading uses simulated money. Returns shown relative
+to $50 assume no deposits or withdrawals since the start.
 </p>
 </main>
 </body>
@@ -323,10 +390,7 @@ of live trading results.
         page,
         encoding="utf-8"
     )
-
-    logging.info(
-        "Dashboard generated successfully: dashboard.html"
-    )
+    logging.info("Dashboard V3 generated: dashboard.html")
 
 
 if __name__ == "__main__":
