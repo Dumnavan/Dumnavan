@@ -1,0 +1,45 @@
+
+name: SPY Paper Executor
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Submit simulated Alpaca orders?"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpaca-paper-account
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    name: SPY paper execution
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r alpaca-paper-bot/requirements.txt
+
+      - name: Run SPY executor
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          EXPECTED_PAPER_ACCOUNT_ID: ${{ vars.EXPECTED_PAPER_ACCOUNT_ID }}
+          EXECUTE_PAPER_ORDERS: ${{ inputs.execute }}
+          CONFIRM_PAPER_EXECUTION: ${{ inputs.execute && 'I_UNDERSTAND_PAPER_ORDERS' || '' }}
+        run: python alpaca-paper-bot/paper_executor.py
